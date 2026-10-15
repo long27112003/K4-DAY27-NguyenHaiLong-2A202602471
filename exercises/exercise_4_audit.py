@@ -56,14 +56,11 @@ AGENT_ID = "pr-review-agent@v0.1"
 
 
 async def audit(state, entry: AuditEntry) -> None:
-    """Write one structured AuditEntry row to the `audit_events` table.
-
-    `thread_id` and `pr_url` are taken from `state` so callers only build
-    the entry itself.
+    """Ghi một dòng AuditEntry có cấu trúc vào bảng `audit_events` trong SQLite.
+    
+    Lấy `thread_id` và `pr_url` trực tiếp từ state để caller chỉ cần truyền thông tin entry.
     """
-    # TODO: call write_audit_event(thread_id=state["thread_id"],
-    #                              pr_url=state["pr_url"], entry=entry)
-    raise NotImplementedError("Implement the audit() body — one call to write_audit_event")
+    await write_audit_event(thread_id=state["thread_id"], pr_url=state["pr_url"], entry=entry)
 
 
 # ─── Reference example — read this carefully ───────────────────────────────
@@ -103,11 +100,30 @@ async def node_analyze(state):
     llm = get_llm().with_structured_output(PRAnalysis)
     with console.status("[dim]LLM reviewing the diff...[/dim]"):
         a: PRAnalysis = await llm.ainvoke([
-            {"role": "system", "content": "Senior reviewer. Structured output."},
+            {"role": "system", "content": (
+                "You are a senior code reviewer. Structured output. "
+                "Calibrate your confidence carefully: "
+                "Rate confidence > 0.75 for straightforward, safe PRs. "
+                "Rate confidence between 0.60 and 0.72 for moderate PRs needing human verification. "
+                "Rate confidence < 0.58 for high-risk PRs with security flaws (e.g. MD5 hashing, plain text secrets, SQL injection, missing tests). "
+                "IMPORTANT: If confidence < 60%, you MUST populate escalation_questions with 2–4 specific, context-rich questions "
+                "referencing specific files and sections in the diff to ask the human reviewer."
+            )},
             {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
         ])
     console.print(f"  [green]✓[/green] confidence={a.confidence:.0%}, {len(a.comments)} comment(s)")
-    # TODO: build and emit an AuditEntry for this step. Use the LLM's output `a`.
+    
+    # Ghi nhận AuditEntry cho bước analyze
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="analyze",
+        confidence=a.confidence,
+        risk_level=risk_level_for(a.confidence),
+        reviewer_id=None,
+        decision="pending",
+        reason=a.confidence_reasoning,
+        execution_time_ms=int((time.monotonic() - t0) * 1000),
+    ))
     return {"analysis": a}
 
 
@@ -122,7 +138,19 @@ async def node_route(state):
     else:
         decision = "human_approval"
     console.print(f"  [green]✓[/green] decision=[bold]{decision}[/bold] (confidence={c:.0%})")
-    # TODO: emit an AuditEntry — this is the first row where `decision` is real.
+    
+    # Ghi nhận AuditEntry cho bước route
+    route_decision = "auto" if decision == "auto_approve" else ("escalate" if decision == "escalate" else "pending")
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="route",
+        confidence=c,
+        risk_level=risk_level_for(c),
+        reviewer_id=None,
+        decision=route_decision,
+        reason=f"Confidence {c:.0%} -> routed to {decision}",
+        execution_time_ms=int((time.monotonic() - t0) * 1000),
+    ))
     return {"decision": decision}
 
 
@@ -130,8 +158,19 @@ async def node_human_approval(state):
     t0 = time.monotonic()
     a = state["analysis"]
 
-    # TODO #1 — audit BEFORE the interrupt. No human has responded yet.
+    # TODO #1 — Ghi log TRƯỚC khi gọi interrupt. Người thật chưa phản hồi.
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="human_approval",
+        confidence=a.confidence,
+        risk_level=risk_level_for(a.confidence),
+        reviewer_id=None,
+        decision="pending",
+        reason="Awaiting reviewer approval/rejection",
+        execution_time_ms=int((time.monotonic() - t0) * 1000),
+    ))
 
+    t_resume = time.monotonic()
     resp = interrupt({
         "kind": "approval_request",
         "pr_url": state["pr_url"],
@@ -142,9 +181,20 @@ async def node_human_approval(state):
         "diff_preview": state["pr_diff"][:2000],
     })
 
-    # TODO #2 — audit AFTER resume. Now you know the reviewer's choice
-    #           (approve / reject / edit), their feedback, and who they are
-    #           (os.environ.get("GITHUB_USER")).
+    # TODO #2 — Ghi log SAU khi resume. Đã có quyết định của reviewer.
+    reviewer = os.environ.get("GITHUB_USER") or "reviewer"
+    choice = resp.get("choice", "unknown")
+    feedback = resp.get("feedback") or ""
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="human_approval",
+        confidence=a.confidence,
+        risk_level=risk_level_for(a.confidence),
+        reviewer_id=reviewer,
+        decision=choice,
+        reason=feedback or f"Reviewer chose {choice}",
+        execution_time_ms=int((time.monotonic() - t_resume) * 1000),
+    ))
     return {"human_choice": resp.get("choice"), "human_feedback": resp.get("feedback")}
 
 
@@ -183,7 +233,21 @@ async def node_commit(state):
     else:
         console.print(f"  [yellow]·[/yellow] skipping comment (choice={state.get('human_choice')})")
         action = "rejected"
-    # TODO: emit an AuditEntry summarising what was committed (or rejected).
+    
+    # Ghi nhận AuditEntry tổng kết những gì đã commit (hoặc reject)
+    commit_decision = "approve" if action in ("committed", "committed_after_escalation", "auto_approved") else "reject"
+    conf = state["analysis"].confidence if state.get("analysis") else 0.0
+    reviewer = os.environ.get("GITHUB_USER") if state.get("human_choice") or state.get("escalation_answers") else None
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="commit",
+        confidence=conf,
+        risk_level=risk_level_for(conf),
+        reviewer_id=reviewer,
+        decision=commit_decision,
+        reason=f"Action: {action}",
+        execution_time_ms=int((time.monotonic() - t0) * 1000),
+    ))
     return {"final_action": action}
 
 
@@ -192,7 +256,17 @@ async def node_auto_approve(state):
     t0 = time.monotonic()
     a = state["analysis"]
     action = _post(state)
-    # TODO: emit an AuditEntry — no human was involved, decision is "auto".
+    # Ghi nhận AuditEntry khi tự động duyệt (không có người can thiệp, decision="auto")
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="auto_approve",
+        confidence=a.confidence,
+        risk_level=risk_level_for(a.confidence),
+        reviewer_id=None,
+        decision="auto",
+        reason=f"High confidence ({a.confidence:.0%}) - auto approved",
+        execution_time_ms=int((time.monotonic() - t0) * 1000),
+    ))
     return {"final_action": f"auto_{action}"}
 
 
@@ -201,8 +275,19 @@ async def node_escalate(state):
     a = state["analysis"]
     questions = a.escalation_questions or ["What is the intent of this PR?"]
 
-    # TODO #1 — audit BEFORE the interrupt (reviewer hasn't answered yet).
+    # TODO #1 — Ghi log TRƯỚC khi gọi interrupt (reviewer chưa trả lời)
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="escalate",
+        confidence=a.confidence,
+        risk_level=risk_level_for(a.confidence),
+        reviewer_id=None,
+        decision="escalate",
+        reason=f"Escalated with {len(questions)} question(s) awaiting answers",
+        execution_time_ms=int((time.monotonic() - t0) * 1000),
+    ))
 
+    t_resume = time.monotonic()
     answers = interrupt({
         "kind": "escalation",
         "pr_url": state["pr_url"],
@@ -213,7 +298,19 @@ async def node_escalate(state):
         "questions": questions,
     })
 
-    # TODO #2 — audit AFTER resume. You now have the answers.
+    # TODO #2 — Ghi log SAU khi resume. Đã có câu trả lời từ reviewer.
+    reviewer = os.environ.get("GITHUB_USER") or "reviewer"
+    summary_answers = "; ".join(f"{q}: {ans}" for q, ans in answers.items()) if isinstance(answers, dict) else str(answers)
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="escalate",
+        confidence=a.confidence,
+        risk_level=risk_level_for(a.confidence),
+        reviewer_id=reviewer,
+        decision="escalate",
+        reason=f"Reviewer answered: {summary_answers[:200]}",
+        execution_time_ms=int((time.monotonic() - t_resume) * 1000),
+    ))
     return {"escalation_answers": answers}
 
 
@@ -228,9 +325,17 @@ async def node_synthesize(state):
             {"role": "user", "content": f"Diff:\n{state['pr_diff']}\n\nQ&A:\n{qa}"},
         ])
     console.print(f"  [green]✓[/green] refined confidence={refined.confidence:.0%}")
-    # TODO: emit an AuditEntry — use the NEW confidence (refined.confidence),
-    #       which should be higher than the original analysis.
-    # node_commit will run next and post the refined review to the PR.
+    # Ghi nhận AuditEntry với độ tin cậy mới (refined.confidence)
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="synthesize",
+        confidence=refined.confidence,
+        risk_level=risk_level_for(refined.confidence),
+        reviewer_id=None,
+        decision="pending",
+        reason=f"Refined review synthesized (confidence updated to {refined.confidence:.0%})",
+        execution_time_ms=int((time.monotonic() - t0) * 1000),
+    ))
     return {"analysis": refined}
 
 
@@ -263,9 +368,9 @@ def handle_interrupt(payload):
         console.print(Panel.fit(
             payload["summary"], title=f"conf={payload['confidence']:.0%}", border_style="green",
         ))
-        choice = console.input("approve/reject/edit? ").strip().lower()
-        return {"choice": choice, "feedback": console.input("Feedback: ").strip()}
-    return {q: console.input(f"Q: {q}\nA: ").strip() for q in payload["questions"]}
+        choice = console.input("approve/reject/edit? ").strip().strip("\ufeff").lower()
+        return {"choice": choice, "feedback": console.input("Feedback: ").strip().strip("\ufeff")}
+    return {q: console.input(f"Q: {q}\nA: ").strip().strip("\ufeff") for q in payload["questions"]}
 
 
 async def run(pr_url: str, thread_id: str | None):
