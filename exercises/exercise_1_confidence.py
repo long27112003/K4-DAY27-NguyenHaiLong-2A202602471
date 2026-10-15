@@ -40,22 +40,48 @@ def node_fetch_pr(state: ReviewState) -> dict:
 
 def node_analyze(state: ReviewState) -> dict:
     console.print("[cyan]→ analyze[/cyan]")
-    # TODO: call the LLM with structured output PRAnalysis.
-    # Hint:  llm = get_llm().with_structured_output(PRAnalysis)
-    #        analysis = llm.invoke([...])
-    #        return {"analysis": analysis}
-    # When implemented, wrap the call in:
-    #        with console.status("[dim]LLM thinking...[/dim]"):
-    #            analysis = llm.invoke([...])
-    raise NotImplementedError("Implement node_analyze")
+    # Khởi tạo mô hình LLM từ factory và ép kiểu đầu ra thành cấu trúc PRAnalysis (Pydantic model)
+    llm = get_llm().with_structured_output(PRAnalysis)
+    
+    # Gọi LLM phân tích tiêu đề và nội dung diff thay đổi của PR
+    with console.status("[dim]LLM thinking...[/dim]"):
+        analysis = llm.invoke([
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior code reviewer. Structured output. "
+                    "Calibrate your confidence carefully: "
+                    "Rate confidence > 0.75 for straightforward, safe PRs (e.g. minor field additions). "
+                    "Rate confidence between 0.60 and 0.72 for moderate PRs needing human verification. "
+                    "Rate confidence < 0.58 for high-risk PRs with security flaws (e.g. MD5 hashing, plain text secrets, SQL injection, missing tests)."
+                ),
+            },
+            {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
+        ])
+    
+    console.print(f"  [green]✓[/green] confidence={analysis.confidence:.0%}, {len(analysis.comments)} comment(s)")
+    # Cập nhật kết quả phân tích vào state của LangGraph
+    return {"analysis": analysis}
 
 
 def node_route(state: ReviewState) -> dict:
     console.print("[cyan]→ route[/cyan]")
-    # TODO: read state["analysis"].confidence and return
-    #       {"decision": "auto_approve" | "human_approval" | "escalate"}
-    # Thresholds provided: AUTO_APPROVE_THRESHOLD (0.85) and ESCALATE_THRESHOLD (0.60).
-    raise NotImplementedError("Implement node_route")
+    # Lấy điểm tự tin (confidence: 0.0 - 1.0) do LLM tự đánh giá từ bước analyze
+    c = state["analysis"].confidence
+    
+    # Phân loại nhánh dựa trên các ngưỡng định sẵn:
+    # - Nếu confidence >= AUTO_APPROVE_THRESHOLD (0.73) -> auto_approve (an toàn, tự duyệt)
+    # - Nếu confidence < ESCALATE_THRESHOLD (0.58) -> escalate (rủi ro cao, cần hỏi thêm người)
+    # - Từ 58% đến 72% -> human_approval (rủi ro trung bình, cần người duyệt trực tiếp)
+    if c >= AUTO_APPROVE_THRESHOLD:
+        decision = "auto_approve"
+    elif c < ESCALATE_THRESHOLD:
+        decision = "escalate"
+    else:
+        decision = "human_approval"
+        
+    console.print(f"  [green]✓[/green] decision=[bold]{decision}[/bold] (confidence={c:.0%})")
+    return {"decision": decision}
 
 
 def node_auto_approve(state: ReviewState) -> dict:
@@ -74,12 +100,43 @@ def node_escalate(state: ReviewState) -> dict:
 
 
 def build_graph():
+    # Khởi tạo đồ thị StateGraph với lược đồ dữ liệu ReviewState
     g = StateGraph(ReviewState)
-    # TODO: add_node for the 6 nodes above (fetch_pr, analyze, route, auto_approve, human_approval, escalate)
-    # TODO: add_edge from START → fetch_pr → analyze → route
-    # TODO: add_conditional_edges on "route" with mapping
-    #       {"auto_approve": "auto_approve", "human_approval": "human_approval", "escalate": "escalate"}
-    # TODO: add_edge from each terminal node → END
+    
+    # 1. Khai báo các Node tham gia vào đồ thị
+    for name, fn in [
+        ("fetch_pr", node_fetch_pr),
+        ("analyze", node_analyze),
+        ("route", node_route),
+        ("auto_approve", node_auto_approve),
+        ("human_approval", node_human_approval),
+        ("escalate", node_escalate),
+    ]:
+        g.add_node(name, fn)
+        
+    # 2. Tạo luồng chạy tuần tự ban đầu: Bắt đầu -> Lấy PR -> Phân tích -> Định tuyến
+    g.add_edge(START, "fetch_pr")
+    g.add_edge("fetch_pr", "analyze")
+    g.add_edge("analyze", "route")
+    
+    # 3. Tạo cạnh rẽ nhánh có điều kiện (conditional edges):
+    # Dựa vào giá trị state['decision'] trả về từ node_route để chuyển hướng sang node tương ứng
+    g.add_conditional_edges(
+        "route",
+        lambda s: s["decision"],
+        {
+            "auto_approve": "auto_approve",
+            "human_approval": "human_approval",
+            "escalate": "escalate",
+        },
+    )
+    
+    # 4. Cả 3 nhánh đích sau khi thực hiện xong đều kết thúc đồ thị (END)
+    g.add_edge("auto_approve", END)
+    g.add_edge("human_approval", END)
+    g.add_edge("escalate", END)
+    
+    # Biên dịch đồ thị
     return g.compile()
 
 
