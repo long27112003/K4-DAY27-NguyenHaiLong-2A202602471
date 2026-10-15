@@ -49,7 +49,9 @@ def node_analyze(state: ReviewState) -> dict:
             {
                 "role": "system",
                 "content": (
-                    "You are a senior code reviewer. Structured output. "
+                    "You are a senior code reviewer. Structured output.\n"
+                    "QUAN TRỌNG: Toàn bộ nội dung phân tích (summary, confidence_reasoning, risk_factors, comments, escalation_questions) "
+                    "BẮT BUỘC PHẢI ĐƯỢC VIẾT HOÀN TOÀN BẰNG TIẾNG VIỆT tự nhiên, chuẩn kỹ thuật phần mềm.\n"
                     "Calibrate your confidence carefully: "
                     "Rate confidence > 0.75 for straightforward, safe PRs (e.g. minor field additions). "
                     "Rate confidence between 0.60 and 0.72 for moderate PRs needing human verification. "

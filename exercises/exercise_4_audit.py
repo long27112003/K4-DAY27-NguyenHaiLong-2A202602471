@@ -101,13 +101,15 @@ async def node_analyze(state):
     with console.status("[dim]LLM reviewing the diff...[/dim]"):
         a: PRAnalysis = await llm.ainvoke([
             {"role": "system", "content": (
-                "You are a senior code reviewer. Structured output. "
-                "Calibrate your confidence carefully: "
-                "Rate confidence > 0.75 for straightforward, safe PRs. "
-                "Rate confidence between 0.60 and 0.72 for moderate PRs needing human verification. "
-                "Rate confidence < 0.58 for high-risk PRs with security flaws (e.g. MD5 hashing, plain text secrets, SQL injection, missing tests). "
-                "IMPORTANT: If confidence < 60%, you MUST populate escalation_questions with 2–4 specific, context-rich questions "
-                "referencing specific files and sections in the diff to ask the human reviewer."
+                "You are a senior code reviewer. Structured output.\n"
+                "QUAN TRỌNG: Toàn bộ nội dung phân tích (summary, confidence_reasoning, risk_factors, comments, escalation_questions) "
+                "BẮT BUỘC PHẢI ĐƯỢC VIẾT HOÀN TOÀN BẰNG TIẾNG VIỆT tự nhiên, chuẩn kỹ thuật phần mềm.\n"
+                "Calibrate your confidence carefully:\n"
+                "- Đặt confidence > 0.75 cho các PR đơn giản, an toàn.\n"
+                "- Đặt confidence trong khoảng 0.60 đến 0.72 cho các PR có độ phức tạp vừa phải cần người kiểm tra.\n"
+                "- Đặt confidence < 0.58 cho các PR rủi ro cao, có lỗ hổng bảo mật (ví dụ: băm mật khẩu bằng MD5, lưu token dạng plain text, SQL injection, thiếu test).\n"
+                "Nếu confidence < 60%, bạn BẮT BUỘC phải tạo 2–4 câu hỏi chất vấn (escalation_questions) HOÀN TOÀN BẰNG TIẾNG VIỆT cụ thể, rõ ràng, "
+                "trích dẫn rõ file và đoạn code trong diff để hỏi reviewer con người."
             )},
             {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
         ])
@@ -321,7 +323,15 @@ async def node_synthesize(state):
     llm = get_llm().with_structured_output(PRAnalysis)
     with console.status("[dim]LLM refining review with reviewer answers...[/dim]"):
         refined: PRAnalysis = await llm.ainvoke([
-            {"role": "system", "content": "Refine review with reviewer answers."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior code reviewer synthesizing reviewer answers. "
+                    "QUAN TRỌNG: Toàn bộ nội dung bản đánh giá tinh chỉnh (summary, comments, reasoning) "
+                    "BẮT BUỘC PHẢI ĐƯỢC VIẾT HOÀN TOÀN BẰNG TIẾNG VIỆT tự nhiên, chuẩn kỹ thuật phần mềm. "
+                    "Structured output."
+                ),
+            },
             {"role": "user", "content": f"Diff:\n{state['pr_diff']}\n\nQ&A:\n{qa}"},
         ])
     console.print(f"  [green]✓[/green] refined confidence={refined.confidence:.0%}")
