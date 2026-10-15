@@ -42,8 +42,8 @@ if "final" not in st.session_state:
 
 
 # ─── Page setup ────────────────────────────────────────────────────────────
-st.set_page_config(page_title="HITL PR Review", layout="wide")
-st.title("HITL PR Review Agent")
+st.set_page_config(page_title="Đánh giá PR tự động (HITL)", layout="wide")
+st.title("Trợ lý đánh giá PR (HITL PR Review Agent)")
 
 
 def get_recent_threads():
@@ -73,14 +73,14 @@ def get_recent_threads():
 
 # ─── Sidebar — recent sessions ─────────────────────────────────────────────
 with st.sidebar:
-    st.header("Recent sessions")
+    st.header("Lịch sử phiên duyệt")
     threads = get_recent_threads()
     if threads:
         for t in threads:
             short_id = t["thread_id"][:8]
             pr_name = t["pr_url"].rstrip("/").split("/")[-1]
-            risk_badge = {"low": "🟢", "med": "🟡", "high": "🔴"}.get(t["worst_risk"], "⚪")
-            label = f"{risk_badge} PR #{pr_name} ({short_id})"
+            risk_badge = {"low": "🟢 Thấp", "med": "🟡 Vừa", "high": "🔴 Cao"}.get(t["worst_risk"], "⚪")
+            label = f"{risk_badge} | PR #{pr_name} ({short_id})"
             if st.button(label, key=f"session_{t['thread_id']}", use_container_width=True):
                 st.session_state.thread_id = t["thread_id"]
                 st.session_state.pr_url = t["pr_url"]
@@ -88,57 +88,66 @@ with st.sidebar:
                 st.session_state.final = None
                 st.rerun()
     else:
-        st.caption("Chưa có phiên duyệt nào được lưu.")
+        st.caption("Chưa có phiên duyệt nào được lưu trong database.")
 
 
 # ─── Top form — start a new review ─────────────────────────────────────────
 with st.form("start"):
     pr_url = st.text_input(
-        "PR URL", value=st.session_state.pr_url,
+        "Đường dẫn Pull Request trên GitHub (PR URL)",
+        value=st.session_state.pr_url,
         placeholder="https://github.com/VinUni-AI20k/PR-Demo/pull/1",
     )
-    submitted = st.form_submit_button("Run review", type="primary")
+    submitted = st.form_submit_button("Bắt đầu đánh giá PR", type="primary")
 
 
 # ─── Renderers per interrupt kind ──────────────────────────────────────────
 def render_approval_card(payload: dict) -> dict | None:
-    """58–72% bucket: hiển thị kết quả phân tích và 3 nút Approve / Reject / Edit."""
+    """Nhánh 58–72%: hiển thị kết quả phân tích và 3 nút Duyệt / Từ chối / Chỉnh sửa."""
     conf = payload["confidence"]
-    st.subheader(f"Approval requested — confidence {conf:.0%}")
-    st.caption(payload["confidence_reasoning"])
-    st.markdown(payload["summary"])
+    st.subheader(f"Yêu cầu phê duyệt từ Reviewer — Độ tin cậy: {conf:.0%}")
+    st.caption(f"Lý do tự đánh giá: {payload['confidence_reasoning']}")
+    st.markdown(f"**Tóm tắt nội dung thay đổi:**\n\n{payload['summary']}")
 
+    severity_trans = {
+        "blocker": "Ngăn chặn (Blocker)",
+        "issue": "Lỗi (Issue)",
+        "suggestion": "Góp ý",
+        "nit": "Chi tiết nhỏ",
+    }
     for c in payload.get("comments", []):
-        st.markdown(f"- **[{c['severity']}]** `{c['file']}:{c.get('line') or '?'}` — {c['body']}")
+        sev_label = severity_trans.get(c["severity"], c["severity"])
+        st.markdown(f"- **[{sev_label}]** `{c['file']}:{c.get('line') or '?'}` — {c['body']}")
 
-    with st.expander("Diff"):
+    with st.expander("Xem chi tiết thay đổi code (Diff)"):
         st.code(payload.get("diff_preview", ""), language="diff")
 
-    feedback = st.text_input("Feedback (optional)", key="approval_feedback")
+    feedback = st.text_input("Ý kiến phản hồi / ghi chú bổ sung (không bắt buộc)", key="approval_feedback")
     col1, col2, col3 = st.columns(3)
-    if col1.button("Approve", type="primary", use_container_width=True):
+    if col1.button("Duyệt (Approve)", type="primary", use_container_width=True):
         return {"choice": "approve", "feedback": feedback}
-    if col2.button("Reject", use_container_width=True):
+    if col2.button("Từ chối (Reject)", use_container_width=True):
         return {"choice": "reject", "feedback": feedback}
-    if col3.button("Edit", use_container_width=True):
+    if col3.button("Chỉnh sửa (Edit)", use_container_width=True):
         return {"choice": "edit", "feedback": feedback}
     return None
 
 
 def render_escalation_card(payload: dict) -> dict | None:
-    """< 58% bucket: hiển thị các rủi ro và form các câu hỏi chất vấn từ LLM."""
+    """Nhánh < 58%: hiển thị cảnh báo rủi ro cao và form các câu hỏi chất vấn từ LLM."""
     conf = payload["confidence"]
-    st.subheader(f"Strong escalation — confidence {conf:.0%}")
-    st.caption(payload["confidence_reasoning"])
+    st.subheader(f"Cảnh báo rủi ro cao: Cần giải trình — Độ tin cậy: {conf:.0%}")
+    st.caption(f"Lý do: {payload['confidence_reasoning']}")
     if payload.get("risk_factors"):
-        st.error("Risks: " + ", ".join(payload["risk_factors"]))
-    st.markdown(payload["summary"])
+        st.error("⚠️ Các yếu tố rủi ro phát hiện: " + ", ".join(payload["risk_factors"]))
+    st.markdown(f"**Tóm tắt:** {payload['summary']}")
+    st.write("**Vui lòng trả lời các câu hỏi làm rõ dưới đây để Agent tái tổng hợp bản review:**")
 
     with st.form("escalation"):
         answers: dict[str, str] = {}
         for i, q in enumerate(payload.get("questions", [])):
-            answers[q] = st.text_input(q, key=f"q_{i}")
-        submitted_answers = st.form_submit_button("Submit answers", type="primary")
+            answers[q] = st.text_input(f"Câu hỏi {i+1}: {q}", key=f"q_{i}")
+        submitted_answers = st.form_submit_button("Gửi câu trả lời", type="primary")
         if submitted_answers:
             return answers
     return None
@@ -166,7 +175,7 @@ if submitted and pr_url:
     st.session_state.interrupt_payload = None
     st.session_state.final = None
 
-    with st.spinner("Fetching PR + asking the LLM..."):
+    with st.spinner("Đang tải dữ liệu PR và gọi AI phân tích mã nguồn..."):
         result = asyncio.run(run_graph(pr_url, st.session_state.thread_id))
 
     if "__interrupt__" in result:
@@ -180,7 +189,7 @@ if payload is not None:
     kind = payload["kind"]
     answer = render_approval_card(payload) if kind == "approval_request" else render_escalation_card(payload)
     if answer is not None:
-        with st.spinner("Resuming..."):
+        with st.spinner("Đang gửi phản hồi và tiếp tục quy trình..."):
             result = asyncio.run(run_graph(
                 st.session_state.pr_url, st.session_state.thread_id, resume_value=answer,
             ))
@@ -196,10 +205,10 @@ if st.session_state.final is not None:
     final = st.session_state.final
     action = final.get("final_action", "?")
     if action.startswith("auto") or action.startswith("committed"):
-        st.success(f"✓ {action} — comment posted to {st.session_state.pr_url}")
+        st.success(f"✓ Đã hoàn tất ({action}) — Nhận xét review đã được đăng thành công lên {st.session_state.pr_url}")
     elif action == "rejected":
-        st.warning("Rejected — no comment posted")
+        st.warning("Đã từ chối PR — Không đăng nhận xét lên GitHub")
     else:
-        st.info(f"final_action = {action}")
-    st.caption(f"thread_id = {st.session_state.thread_id}  ·  replay: "
+        st.info(f"Kết quả xử lý: {action}")
+    st.caption(f"Mã phiên (thread_id): `{st.session_state.thread_id}`  ·  Lệnh phát lại lịch sử: "
                f"`uv run python -m audit.replay --thread {st.session_state.thread_id}`")
