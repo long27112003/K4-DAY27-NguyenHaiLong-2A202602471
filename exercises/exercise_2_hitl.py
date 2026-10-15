@@ -43,7 +43,16 @@ def node_analyze(state: ReviewState) -> dict:
     llm = get_llm().with_structured_output(PRAnalysis)
     with console.status("[dim]LLM reviewing the diff...[/dim]"):
         analysis = llm.invoke([
-            {"role": "system", "content": "Senior reviewer. Structured output."},
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior code reviewer. Structured output. "
+                    "Calibrate your confidence carefully: "
+                    "Rate confidence > 0.75 for straightforward, safe PRs (e.g. minor field additions). "
+                    "Rate confidence between 0.60 and 0.72 for moderate PRs needing human verification. "
+                    "Rate confidence < 0.58 for high-risk PRs with security flaws (e.g. MD5 hashing, plain text secrets, SQL injection, missing tests)."
+                ),
+            },
             {"role": "user", "content": f"Title: {state['pr_title']}\nDiff:\n{state['pr_diff']}"},
         ])
     console.print(f"  [green]✓[/green] confidence={analysis.confidence:.0%}, {len(analysis.comments)} comment(s)")
@@ -61,19 +70,29 @@ def node_route(state: ReviewState) -> dict:
 
 
 def node_human_approval(state: ReviewState) -> dict:
-    """Pause and ask the human."""
+    """Tạm dừng đồ thị (interrupt) và xin ý kiến phê duyệt từ con người."""
     a = state["analysis"]
-    # TODO: call interrupt(payload) where payload contains these fields:
-    #         "kind": "approval_request",
-    #         "confidence": a.confidence,
-    #         "confidence_reasoning": a.confidence_reasoning,
-    #         "summary": a.summary,
-    #         "comments": [c.model_dump() for c in a.comments],
-    #         "diff_preview": state["pr_diff"][:2000],
-    # interrupt() returns whatever the caller passes via Command(resume=...).
-    # response = interrupt(...)
-    # return {"human_choice": response["choice"], "human_feedback": response.get("feedback")}
-    raise NotImplementedError("Call interrupt() with an approval_request payload")
+    
+    # Đóng gói thông tin phân tích cần thiết để reviewer xem xét
+    payload = {
+        "kind": "approval_request",
+        "confidence": a.confidence,
+        "confidence_reasoning": a.confidence_reasoning,
+        "summary": a.summary,
+        "comments": [c.model_dump() for c in a.comments],
+        "diff_preview": state["pr_diff"][:2000],
+    }
+    
+    # interrupt(payload): Đóng băng luồng chạy của LangGraph tại đây.
+    # Dữ liệu payload sẽ được trả ra cho phía gọi (main / UI).
+    # Khi bên ngoài gọi Command(resume=answer), giá trị answer sẽ được trả về vào biến response.
+    response = interrupt(payload)
+    
+    # Cập nhật kết quả phản hồi của con người vào ReviewState
+    return {
+        "human_choice": response["choice"],
+        "human_feedback": response.get("feedback"),
+    }
 
 
 def _render_comment_body(state: ReviewState) -> str:
@@ -133,8 +152,9 @@ def build_graph():
     g.add_edge("human_approval", "commit")
     g.add_edge("commit", END)
     g.add_edge("escalate", END)
-    # TODO: compile with checkpointer=MemorySaver()
-    return g.compile()
+    # Biên dịch đồ thị kèm Checkpointer (MemorySaver) để lưu trữ trạng thái khi gặp interrupt()
+    checkpointer = MemorySaver()
+    return g.compile(checkpointer=checkpointer)
 
 
 def prompt_human(payload: dict) -> dict:
@@ -153,7 +173,7 @@ def prompt_human(payload: dict) -> dict:
 
     choice = ""
     while choice not in {"approve", "reject", "edit"}:
-        choice = console.input("\n[bold]Choice (approve/reject/edit)?[/bold] ").strip().lower()
+        choice = console.input("\n[bold]Choice (approve/reject/edit)?[/bold] ").strip().strip("\ufeff").lower()
     feedback = console.input("Feedback: ").strip() if choice != "approve" else ""
     return {"choice": choice, "feedback": feedback}
 
@@ -174,12 +194,15 @@ def main() -> None:
 
     result = app.invoke({"pr_url": args.pr, "thread_id": thread_id}, cfg)
 
-    # TODO: write a `while "__interrupt__" in result:` loop:
-    #   - take payload from result["__interrupt__"][0].value
-    #   - call prompt_human(payload)
-    #   - resume with app.invoke(Command(resume=<answer>), cfg)
-    # while "__interrupt__" in result:
-    #     ...
+    # Vòng lặp xử lý khi đồ thị gặp interrupt():
+    # Khi node_human_approval gọi interrupt(), app.invoke trả về dict chứa key "__interrupt__"
+    while "__interrupt__" in result:
+        # 1. Trích xuất payload chứa diff và các phân tích từ interrupt
+        payload = result["__interrupt__"][0].value
+        # 2. Hiển thị thông tin lên giao diện console và nhận quyết định từ reviewer (approve/reject/edit)
+        answer = prompt_human(payload)
+        # 3. Đánh thức đồ thị tiếp tục chạy bằng Command(resume=answer) với đúng config thread_id
+        result = app.invoke(Command(resume=answer), cfg)
 
     console.rule("Done")
     console.print(result.get("final_action"))
