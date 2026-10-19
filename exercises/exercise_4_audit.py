@@ -18,7 +18,7 @@ Approach:
     - Implement the one-line body of `audit()`. Everything else (graph wiring,
       checkpointer setup, interrupt/resume loop) is already done for you.
 
-TODOs to complete (10 total): the audit() body, ONE AuditEntry per node for
+Implemented audit steps (10 total): the audit() body, ONE AuditEntry per node for
 analyze/route/commit/auto_approve/synthesize, TWO each for human_approval and
 escalate (before + after the interrupt).
 """
@@ -160,7 +160,7 @@ async def node_human_approval(state):
     t0 = time.monotonic()
     a = state["analysis"]
 
-    # TODO #1 — Ghi log TRƯỚC khi gọi interrupt. Người thật chưa phản hồi.
+    # Record the pending decision before interrupting for human review.
     await audit(state, AuditEntry(
         agent_id=AGENT_ID,
         action="human_approval",
@@ -183,7 +183,7 @@ async def node_human_approval(state):
         "diff_preview": state["pr_diff"][:2000],
     })
 
-    # TODO #2 — Ghi log SAU khi resume. Đã có quyết định của reviewer.
+    # Record the reviewer's decision after resuming.
     reviewer = os.environ.get("GITHUB_USER") or "reviewer"
     choice = resp.get("choice", "unknown")
     feedback = resp.get("feedback") or ""
@@ -277,7 +277,7 @@ async def node_escalate(state):
     a = state["analysis"]
     questions = a.escalation_questions or ["What is the intent of this PR?"]
 
-    # TODO #1 — Ghi log TRƯỚC khi gọi interrupt (reviewer chưa trả lời)
+    # Record escalation before interrupting for answers.
     await audit(state, AuditEntry(
         agent_id=AGENT_ID,
         action="escalate",
@@ -300,7 +300,7 @@ async def node_escalate(state):
         "questions": questions,
     })
 
-    # TODO #2 — Ghi log SAU khi resume. Đã có câu trả lời từ reviewer.
+    # Record the supplied answers after resuming.
     reviewer = os.environ.get("GITHUB_USER") or "reviewer"
     summary_answers = "; ".join(f"{q}: {ans}" for q, ans in answers.items()) if isinstance(answers, dict) else str(answers)
     await audit(state, AuditEntry(
