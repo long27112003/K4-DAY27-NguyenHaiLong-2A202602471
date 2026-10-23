@@ -28,7 +28,7 @@ This lab builds an agent that auto-triages every PR:
 1. The LLM reads the diff and produces a structured review with a **self-reported confidence score**.
 2. **Confidence > 72%** → the agent posts the review comment itself; no human in the loop.
 3. **58–72%** → the agent pauses (`interrupt()`) and shows the reviewer the diff + LLM reasoning + a one-click **approve / reject / edit** panel. On approve, the comment posts.
-4. **< 58%** → the agent **escalates strongly**. It shows the reviewer *specific questions the LLM is uncertain about* ("Why MD5? Is `SYNC_URL` meant to be HTTPS in production?") and waits for answers. Then it re-asks the LLM with the answers in context and posts a **refined** review.
+4. **< 58%** → the agent **escalates strongly**. It shows the reviewer *specific questions the LLM is uncertain about* ("Why MD5? Is `SYNC_URL` meant to be HTTPS in production?") and waits for answers. Then it re-asks the LLM with the answers in context and shows the **refined** review for final human approval before posting.
 
 Every step writes a row to a structured audit table — every routing decision, every human interaction, every LLM call — so the team can replay any session for compliance or debugging.
 
@@ -44,7 +44,7 @@ flowchart TD
     Escalate --> Synth[synthesize]
     Auto --> Commit[commit]
     Human --> Commit
-    Synth --> Commit
+    Synth --> Human
 ```
 
 Every node also writes one row to `audit_events`. The graph state is persisted by `AsyncSqliteSaver`, so an interrupted session can resume from exactly where it stopped — even after the process is killed.

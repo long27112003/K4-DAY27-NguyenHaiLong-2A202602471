@@ -172,11 +172,10 @@ def node_commit(state):
     console.print("[cyan]→ commit[/cyan]")
     # Two paths converge here:
     #   1. human_approval → commit (only post if approved)
-    #   2. escalate → synthesize → commit (always post the refined review)
-    if state.get("escalation_answers"):
-        return {"final_action": _post(state, "committed_after_escalation")}
+    #   2. escalate → synthesize → final human approval → commit
     if state.get("human_choice") == "approve":
-        return {"final_action": _post(state, "committed")}
+        label = "committed_after_escalation" if state.get("escalation_answers") else "committed"
+        return {"final_action": _post(state, label)}
     console.print(f"  [yellow]·[/yellow] skipping comment (choice={state.get('human_choice')})")
     return {"final_action": "rejected"}
 
@@ -204,9 +203,9 @@ def build_graph():
     g.add_edge("auto_approve", END)
     g.add_edge("human_approval", "commit")
     g.add_edge("commit", END)
-    # Nối luồng leo thang: escalate -> synthesize -> commit (commit đã nối tới END)
+    # The refined review needs a final human decision before it can be posted.
     g.add_edge("escalate", "synthesize")
-    g.add_edge("synthesize", "commit")
+    g.add_edge("synthesize", "human_approval")
     return g.compile(checkpointer=MemorySaver())
 
 

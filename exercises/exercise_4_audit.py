@@ -153,24 +153,21 @@ async def node_route(state):
         reason=f"Confidence {c:.0%} -> routed to {decision}",
         execution_time_ms=int((time.monotonic() - t0) * 1000),
     ))
+    if decision in ("human_approval", "escalate"):
+        await audit(state, AuditEntry(
+            agent_id=AGENT_ID,
+            action=decision,
+            confidence=c,
+            risk_level=risk_level_for(c),
+            decision="pending" if decision == "human_approval" else "escalate",
+            reason="Awaiting reviewer input",
+            execution_time_ms=0,
+        ))
     return {"decision": decision}
 
 
 async def node_human_approval(state):
-    t0 = time.monotonic()
     a = state["analysis"]
-
-    # Record the pending decision before interrupting for human review.
-    await audit(state, AuditEntry(
-        agent_id=AGENT_ID,
-        action="human_approval",
-        confidence=a.confidence,
-        risk_level=risk_level_for(a.confidence),
-        reviewer_id=None,
-        decision="pending",
-        reason="Awaiting reviewer approval/rejection",
-        execution_time_ms=int((time.monotonic() - t0) * 1000),
-    ))
 
     t_resume = time.monotonic()
     resp = interrupt({
@@ -229,8 +226,8 @@ async def node_commit(state):
     t0 = time.monotonic()
     # Two paths converge here:
     #   1. human_approval → commit (only post if approved)
-    #   2. escalate → synthesize → commit (always post the refined review)
-    if state.get("escalation_answers") or state.get("human_choice") == "approve":
+    #   2. escalate → synthesize → final human approval → commit
+    if state.get("human_choice") == "approve":
         action = _post(state)
     else:
         console.print(f"  [yellow]·[/yellow] skipping comment (choice={state.get('human_choice')})")
@@ -273,21 +270,8 @@ async def node_auto_approve(state):
 
 
 async def node_escalate(state):
-    t0 = time.monotonic()
     a = state["analysis"]
     questions = a.escalation_questions or ["What is the intent of this PR?"]
-
-    # Record escalation before interrupting for answers.
-    await audit(state, AuditEntry(
-        agent_id=AGENT_ID,
-        action="escalate",
-        confidence=a.confidence,
-        risk_level=risk_level_for(a.confidence),
-        reviewer_id=None,
-        decision="escalate",
-        reason=f"Escalated with {len(questions)} question(s) awaiting answers",
-        execution_time_ms=int((time.monotonic() - t0) * 1000),
-    ))
 
     t_resume = time.monotonic()
     answers = interrupt({
@@ -346,6 +330,15 @@ async def node_synthesize(state):
         reason=f"Refined review synthesized (confidence updated to {refined.confidence:.0%})",
         execution_time_ms=int((time.monotonic() - t0) * 1000),
     ))
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="human_approval",
+        confidence=refined.confidence,
+        risk_level=risk_level_for(refined.confidence),
+        decision="pending",
+        reason="Awaiting final approval of refined review",
+        execution_time_ms=0,
+    ))
     return {"analysis": refined}
 
 
@@ -368,7 +361,7 @@ def build_graph(checkpointer):
     g.add_edge("human_approval", "commit")
     g.add_edge("commit", END)
     g.add_edge("escalate", "synthesize")
-    g.add_edge("synthesize", "commit")
+    g.add_edge("synthesize", "human_approval")
     return g.compile(checkpointer=checkpointer)
 
 
