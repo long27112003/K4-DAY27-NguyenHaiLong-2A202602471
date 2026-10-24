@@ -19,11 +19,10 @@ import uuid
 
 import streamlit as st
 from dotenv import load_dotenv
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
 import sqlite3
-from common.db import db_path
+from common.db import checkpoint_saver, db_path
 from exercises.exercise_4_audit import build_graph
 
 
@@ -71,6 +70,17 @@ def get_recent_threads():
         return []
 
 
+async def load_saved_session(thread_id: str) -> tuple[dict | None, dict | None]:
+    """Restore either the pending human question or the completed graph state."""
+    async with checkpoint_saver() as saver:
+        graph = build_graph(saver)
+        snapshot = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+        for task in snapshot.tasks:
+            if task.interrupts:
+                return task.interrupts[0].value, None
+        return None, snapshot.values if snapshot.values.get("final_action") else None
+
+
 # ─── Sidebar — recent sessions ─────────────────────────────────────────────
 with st.sidebar:
     st.header("Lịch sử phiên duyệt")
@@ -84,8 +94,9 @@ with st.sidebar:
             if st.button(label, key=f"session_{t['thread_id']}", use_container_width=True):
                 st.session_state.thread_id = t["thread_id"]
                 st.session_state.pr_url = t["pr_url"]
-                st.session_state.interrupt_payload = None
-                st.session_state.final = None
+                pending, final = asyncio.run(load_saved_session(t["thread_id"]))
+                st.session_state.interrupt_payload = pending
+                st.session_state.final = final
                 st.rerun()
     else:
         st.caption("Chưa có phiên duyệt nào được lưu trong database.")
@@ -129,6 +140,9 @@ def render_approval_card(payload: dict) -> dict | None:
     if col2.button("Từ chối (Reject)", use_container_width=True):
         return {"choice": "reject", "feedback": feedback}
     if col3.button("Chỉnh sửa (Edit)", use_container_width=True):
+        if not feedback.strip():
+            st.warning("Hãy ghi rõ nội dung cần sửa trước khi chọn Chỉnh sửa.")
+            return None
         return {"choice": "edit", "feedback": feedback}
     return None
 
@@ -156,8 +170,7 @@ def render_escalation_card(payload: dict) -> dict | None:
 # ─── Drive the graph ───────────────────────────────────────────────────────
 async def run_graph(pr_url: str, thread_id: str, resume_value=None):
     """Thực thi đồ thị LangGraph với checkpointer AsyncSqliteSaver."""
-    async with AsyncSqliteSaver.from_conn_string(db_path()) as cp:
-        await cp.setup()
+    async with checkpoint_saver() as cp:
         app = build_graph(cp)
         cfg = {"configurable": {"thread_id": thread_id}}
 

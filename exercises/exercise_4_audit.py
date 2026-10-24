@@ -32,13 +32,12 @@ import time
 import uuid
 
 from dotenv import load_dotenv
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from rich.console import Console
 from rich.panel import Panel
 
-from common.db import db_path, write_audit_event
+from common.db import checkpoint_saver, write_audit_event
 from common.github import fetch_pr, post_review_comment
 from common.llm import get_llm
 from common.schemas import (
@@ -342,12 +341,61 @@ async def node_synthesize(state):
     return {"analysis": refined}
 
 
+async def node_edit_review(state):
+    """Rewrite the proposed review from human feedback, then ask for approval again."""
+    feedback = (state.get("human_feedback") or "").strip()
+    if not feedback:
+        raise ValueError("Edit requires reviewer feedback describing the requested change")
+
+    t0 = time.monotonic()
+    previous = state["analysis"]
+    llm = get_llm().with_structured_output(PRAnalysis)
+    refined: PRAnalysis = await llm.ainvoke([
+        {
+            "role": "system",
+            "content": (
+                "You are a senior code reviewer. Rewrite the proposed review in natural "
+                "Vietnamese using the human reviewer's feedback. Check every comment "
+                "against the PR diff; do not invent files or line numbers. Return structured output."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"PR diff:\n{state['pr_diff']}\n\nPrevious review:\n"
+                f"{previous.model_dump_json()}\n\nReviewer edits:\n{feedback}"
+            ),
+        },
+    ])
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="edit_review",
+        confidence=refined.confidence,
+        risk_level=risk_level_for(refined.confidence),
+        reviewer_id=os.environ.get("GITHUB_USER") or "reviewer",
+        decision="pending",
+        reason="Rewrote review from reviewer feedback; awaiting final approval",
+        execution_time_ms=int((time.monotonic() - t0) * 1000),
+    ))
+    await audit(state, AuditEntry(
+        agent_id=AGENT_ID,
+        action="human_approval",
+        confidence=refined.confidence,
+        risk_level=risk_level_for(refined.confidence),
+        decision="pending",
+        reason="Awaiting approval of edited review",
+        execution_time_ms=0,
+    ))
+    return {"analysis": refined, "human_choice": None}
+
+
 def build_graph(checkpointer):
     g = StateGraph(ReviewState)
     for name, fn in [
         ("fetch_pr", node_fetch_pr), ("analyze", node_analyze), ("route", node_route),
         ("auto_approve", node_auto_approve), ("human_approval", node_human_approval),
         ("commit", node_commit), ("escalate", node_escalate), ("synthesize", node_synthesize),
+        ("edit_review", node_edit_review),
     ]:
         g.add_node(name, fn)
     g.add_edge(START, "fetch_pr")
@@ -358,7 +406,12 @@ def build_graph(checkpointer):
         {"auto_approve": "auto_approve", "human_approval": "human_approval", "escalate": "escalate"},
     )
     g.add_edge("auto_approve", END)
-    g.add_edge("human_approval", "commit")
+    g.add_conditional_edges(
+        "human_approval",
+        lambda s: "edit_review" if s.get("human_choice") == "edit" else "commit",
+        {"edit_review": "edit_review", "commit": "commit"},
+    )
+    g.add_edge("edit_review", "human_approval")
     g.add_edge("commit", END)
     g.add_edge("escalate", "synthesize")
     g.add_edge("synthesize", "human_approval")
@@ -382,8 +435,7 @@ async def run(pr_url: str, thread_id: str | None):
     console.print(f"[dim]PR: {pr_url}[/dim]")
     console.print(f"[dim]thread_id = {thread_id}[/dim]\n")
 
-    async with AsyncSqliteSaver.from_conn_string(db_path()) as cp:
-        await cp.setup()
+    async with checkpoint_saver() as cp:
         app = build_graph(cp)
         cfg = {"configurable": {"thread_id": thread_id}}
 

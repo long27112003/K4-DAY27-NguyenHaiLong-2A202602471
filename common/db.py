@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 import aiosqlite
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from common.schemas import AuditEntry
 
@@ -45,6 +47,22 @@ async def db_conn() -> AsyncIterator[aiosqlite.Connection]:
     try:
         await _ensure_schema(conn)
         yield conn
+    finally:
+        await conn.close()
+
+
+@asynccontextmanager
+async def checkpoint_saver() -> AsyncIterator[AsyncSqliteSaver]:
+    """Persist graph state while allowing only our known Pydantic state types."""
+    conn = await aiosqlite.connect(db_path())
+    try:
+        serializer = JsonPlusSerializer(allowed_msgpack_modules=[
+            ("common.schemas", "PRAnalysis"),
+            ("common.schemas", "ReviewComment"),
+        ])
+        saver = AsyncSqliteSaver(conn, serde=serializer)
+        await saver.setup()
+        yield saver
     finally:
         await conn.close()
 
