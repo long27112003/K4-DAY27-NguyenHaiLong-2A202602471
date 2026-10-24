@@ -14,8 +14,9 @@ Verified with Python 3.11, GitHub REST API and OpenRouter `openai/gpt-4o-mini`. 
 | Checkpoint serializer | The local SQLite checkpointer can reload the existing session with explicit allowlisting for `PRAnalysis` and `ReviewComment`. |
 | Time-travel bonus | Listed 14 checkpoints, forked the first approval checkpoint from an edit-then-reject path to a direct-reject path; both ended without posting. Reproduce with `python -m audit.bonus_time_travel --thread <id>`. |
 | Confidence comparison | `python -m audit.bonus_calibration` reported 4 completed human sessions, mean model confidence 0.673 and 0.000 approval rate. These deliberate rejects are not correctness labels, so the result cannot prove overconfidence. |
+| Two-reviewer fan-out bonus | `python -m audit.bonus_multi_reviewer` used LangGraph `Send` to run two separate reviewer threads, waited for both, and combined 6 answers to 3 PR #2 risk questions. Answers are labeled local simulations, not responses from real reviewers. |
 | Python source | `python -m compileall -q common exercises app.py audit` passed. |
 
 The test deliberately selected `reject` on the instructor's public demo PRs to avoid publishing an unsolicited comment. The posting path and manual browser interaction have not been verified end to end. A model output cap of 2048 tokens is configured because the default 16384-token reservation exceeded the temporary OpenRouter key's $1 limit before generating a response.
 
-The optional auto-edit and time-travel challenges have safe-path tests. Confidence comparison is implemented and reported with its sampling limit. Multi-reviewer fan-out is not evidenced here.
+The optional auto-edit and time-travel challenges have safe-path tests. Confidence comparison is implemented and reported with its sampling limit. Multi-reviewer fan-out is demonstrated with simulated reviewer answers; a live two-person review is not evidenced.

@@ -287,7 +287,7 @@ The skeleton wires up the Streamlit boilerplate (session state, page layout, top
 3. **Multi-reviewer fan-out.** Use the `Send` API to escalate the same questions to two reviewers (two threads) and wait for both.
 4. **Auto-edit.** When the human chooses `edit`, call the LLM again to rewrite the review using `human_feedback`, then commit.
 
-The auto-edit path is implemented with a second approval pause before posting the rewritten review. For safe local bonus demonstrations, use `python -m audit.bonus_time_travel --thread <id>` to fork a saved approval checkpoint into a reject path, and `python -m audit.bonus_calibration` to compare confidence with human decisions. The latter is descriptive: deliberately rejected demo PRs are not correctness labels. See `RUN_EVIDENCE.md` for observed results.
+The auto-edit path is implemented with a second approval pause before posting the rewritten review. For safe local bonus demonstrations, use `python -m audit.bonus_time_travel --thread <id>` to fork a saved approval checkpoint into a reject path, `python -m audit.bonus_calibration` to compare confidence with human decisions, and `python -m audit.bonus_multi_reviewer` to run two simulated reviewer threads through LangGraph `Send`. Deliberately rejected demo PRs are not correctness labels, and the two simulated reviewers are not real people. See `RUN_EVIDENCE.md` for observed results.
 
 ## FAQ / gotchas
 
